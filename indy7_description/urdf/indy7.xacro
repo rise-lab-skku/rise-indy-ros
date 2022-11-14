@@ -4,7 +4,8 @@
 	<xacro:include filename="$(find indy7_description)/urdf/indy7.gazebo"/>
 
 	<xacro:property name="PI" value="3.1415926535897931"/>
-	<xacro:property name="indy_material" value="metal_grey"/>
+	<xacro:property name="indy_material" value="metal_white"/>
+	<!-- <xacro:property name="indy_material" value="metal_grey"/> -->
 	<!-- <material name="grey"> <color rgba="0.5 0.5 0.5 1"/> </material> -->
 
 	<link name="link0">
