@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf
   urdf
   xacro
+  indy_custom_comp_msgs
 )
 
 catkin_package()
@@ -15,4 +16,3 @@ catkin_package()
 include_directories(
   ${catkin_INCLUDE_DIRS}
 )
-

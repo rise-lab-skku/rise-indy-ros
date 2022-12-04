@@ -1,5 +1,5 @@
-#!/usr/bin/python
-#-*- coding: utf-8 -*-
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
 
 import sys
 import json
@@ -21,6 +21,10 @@ from trajectory_msgs.msg import JointTrajectory
 from control_msgs.msg import FollowJointTrajectoryFeedback
 import utils_transf
 
+from indy_custom_comp_msgs import msg as comp_msg
+from indy_custom_comp_msgs import srv as comp_srv
+
+
 ROBOT_STATE = {
     0: "robot_ready",
     1: "busy",
@@ -39,20 +43,31 @@ class IndyROSConnector:
         self.indy = indydcp_client.IndyDCPClient(robot_ip, robot_name)
 
         # Initialize ROS node
-        rospy.init_node('indy_driver_py')
+        rospy.init_node("indy_driver_py")
+
+        # Custom Component Elements
+        self.algorithm_switch_srv = rospy.Service("indy/algorithm_switch", comp_srv.AlgorithmSwitch, self.algorithm_switch_cb)
+        self.current_algorithm_pub = rospy.Publisher("indy/current_algorithm", comp_msg.CompAlgorithm, queue_size=1)
+        self._current_algorithm_msg = comp_msg.CompAlgorithm()
 
         # Publish current robot state
-        self.joint_state_pub = rospy.Publisher('joint_states', JointState, queue_size=10)
+        self.joint_state_pub = rospy.Publisher("joint_states", JointState, queue_size=10)
         self.indy_state_pub = rospy.Publisher("indy/status", GoalStatusArray, queue_size=10)
         self.control_state_pub = rospy.Publisher("feedback_states", FollowJointTrajectoryFeedback, queue_size=1)
 
         # Subscribe desired joint position
-        self.joint_execute_plan_sub = rospy.Subscriber("joint_path_command", JointTrajectory, self.execute_plan_result_cb, queue_size=1)
+        self.joint_execute_plan_sub = rospy.Subscriber(
+            "joint_path_command", JointTrajectory, self.execute_plan_result_cb, queue_size=1
+        )
 
         # Subscribe command
-        self.execute_joint_state_sub = rospy.Subscriber("indy/execute_joint_state", JointState, self.execute_joint_state_cb, queue_size=1)
+        self.execute_joint_state_sub = rospy.Subscriber(
+            "indy/execute_joint_state", JointState, self.execute_joint_state_cb, queue_size=1
+        )
         self.stop_sub = rospy.Subscriber("stop_motion", Bool, self.stop_robot_cb, queue_size=1)
-        self.set_motion_param_sub = rospy.Subscriber("indy/motion_parameter", Int32MultiArray, self.set_motion_param_cb, queue_size=1)
+        self.set_motion_param_sub = rospy.Subscriber(
+            "indy/motion_parameter", Int32MultiArray, self.set_motion_param_cb, queue_size=1
+        )
 
         # Misc variable
         self.joint_state_list = []
@@ -114,7 +129,11 @@ class IndyROSConnector:
             # the planned path. It invokes the abort execution.
             if set_time - start_time > 1:
                 rospy.logerr("[DEBUG] trajectory length: {}".format(len(self.joint_state_list)))
-                rospy.logerr("prog time: {}, add time: {}, json time: {}, set time: {}".format(prog_time-start_time, add_time-prog_time, json_time-add_time, set_time-json_time))
+                rospy.logerr(
+                    "prog time: {}, add time: {}, json time: {}, set time: {}".format(
+                        prog_time - start_time, add_time - prog_time, json_time - add_time, set_time - json_time
+                    )
+                )
             self.joint_state_list = []
 
     def joint_state_publisher(self):
@@ -136,19 +155,19 @@ class IndyROSConnector:
         # self.control_state_pub.publish(control_state_msg)
 
     def robot_state_publisher(self):
-        if self.current_robot_status['ready']:
+        if self.current_robot_status["ready"]:
             state_num = 0
 
-        if self.current_robot_status['busy']:
+        if self.current_robot_status["busy"]:
             state_num = 1
 
-        if self.current_robot_status['direct_teaching']:
+        if self.current_robot_status["direct_teaching"]:
             state_num = 2
 
-        if self.current_robot_status['collision']:
+        if self.current_robot_status["collision"]:
             state_num = 3
 
-        if self.current_robot_status['emergency']:
+        if self.current_robot_status["emergency"]:
             state_num = 4
 
         status_msg = GoalStatusArray()
@@ -160,7 +179,7 @@ class IndyROSConnector:
         status.status = state_num
         status.text = ROBOT_STATE[state_num]
 
-        status_msg.status_list=[status]
+        status_msg.status_list = [status]
 
         self.indy_state_pub.publish(status_msg)
 
@@ -183,16 +202,77 @@ class IndyROSConnector:
         self.current_robot_status = self.indy.get_robot_status()
         if self.execute:
             self.execute = False
-            if self.current_robot_status['busy']:
+            if self.current_robot_status["busy"]:
                 pass
-            if self.current_robot_status['direct_teaching']:
+            if self.current_robot_status["direct_teaching"]:
                 pass
-            if self.current_robot_status['collision']:
+            if self.current_robot_status["collision"]:
                 pass
-            if self.current_robot_status['emergency']:
+            if self.current_robot_status["emergency"]:
                 pass
-            if self.current_robot_status['ready']:
+            if self.current_robot_status["ready"]:
                 self.move_robot()
+
+    def current_algorithm_cb(self, _):
+        """Select algorithm to use.
+
+        Service Flow:
+            1. ros_node -(ROS Service)-> dcp_driver.py
+            2. dcp_driver.py -(IndyDCP: req_from_ros)-> Indy7 component
+            3. Indy7 component -(IndyDCP: resp_to_ros)-> dcp_driver.py
+
+        Publishing Flow of
+            1. Indy7 component -(IndyDCP: resp_current_status)-> dcp_driver.py
+            2. dcp_driver.py -(ROS Topic)-> ros_node
+
+        IndyDCP Mapping:
+            [uint8, B000] resp_to_ros (Not Implemented)
+            [int32, I000] req_from_ros
+                - HEX Map:
+                    0x0000 0000: Not initialized
+                    0x**__ ____: Joint Control Component
+                    0x__** ____: Joint Trajectory Interpolation Component
+                    0x____ **__: Task Control Component
+                    0x____ __**: Task Trajectory Interpolation Component
+                - Controller Value:
+                    0x01__: H-infinity PID control
+                    0x02__: TBD
+                - Trajectory Interpolation Value:
+                    0x__01: TBD
+                    0x__02: TBD
+            [int32, I001] resp_current_status
+        """
+        dv_value = self.indy.read_direct_variable(indydcp_client.DIRECT_VAR_TYPE_DWORD, 1)
+        dv_value = int(dv_value)
+        self._current_algorithm_msg.joint_component = (dv_value >> 16) & 0xFFFF
+        self._current_algorithm_msg.task_component = dv_value & 0xFFFF
+        self.current_algorithm_pub.publish(self._current_algorithm_msg)
+
+    def algorithm_switch_cb(self, req: comp_srv.AlgorithmSwitchRequest):
+        # [int32, I000] req_from_ros
+        dv_value: int = (req.req.joint_component << 16) | req.req.task_component
+        self.indy.write_direct_variable(indydcp_client.DIRECT_VAR_TYPE_DWORD, 0, dv_value)
+        rospy.logwarn(f"Algorithm Switched to: {req.req}")
+        rospy.logwarn(f"dv_value: {dv_value}")
+        # [uint8, B000] resp_to_ros (Not Implemented)
+        _ = self.indy.read_direct_variable(indydcp_client.DIRECT_VAR_TYPE_BYTE, 0)
+        # ROS Response
+        resp = comp_srv.AlgorithmSwitchResponse()
+
+        # Temporary implementation of waiting for the algorithm to be switched
+        timeout = 10.0
+        while not rospy.is_shutdown():
+            if (self._current_algorithm_msg.joint_component == req.req.joint_component) and (
+                self._current_algorithm_msg.task_component == req.req.task_component
+            ):
+                resp.success = True
+                break
+            rospy.sleep(1.0)
+            timeout -= 1.0
+            if timeout <= 0.0:
+                resp.success = False
+                break
+        return resp
 
     def run(self):
         self.indy.connect()
@@ -200,6 +280,7 @@ class IndyROSConnector:
         rospy.Timer(rospy.Duration(0.05), self.publish_state_cb)
         rospy.Timer(rospy.Duration(0.1), self.fake_publish_state_cb)
         rospy.Timer(rospy.Duration(0.05), self.move_robot_cb)
+        rospy.Timer(rospy.Duration(1.0), self.current_algorithm_cb)
         rospy.spin()
 
         self.indy.disconnect()
@@ -211,10 +292,7 @@ class IndyROSConnector:
         trajectory_time = []
 
         # get trajectory information
-        trajectory_time = [
-            p.time_from_start.secs + p.time_from_start.nsecs * 1e-9
-            for p in msg.points
-        ]
+        trajectory_time = [p.time_from_start.secs + p.time_from_start.nsecs * 1e-9 for p in msg.points]
         trajectory_pos = [p.positions for p in msg.points]
 
         # make numpy
@@ -231,24 +309,16 @@ class IndyROSConnector:
         trajectory_time[-1] = (new_points_num - 1) * time_step
 
         # generate new trajectory points time
-        new_trajectory_time = np.linspace(trajectory_time[0],
-                                          trajectory_time[-1], new_points_num)
-        new_trajectory_time = np.arange(0, trajectory_time[-1] + 0.001,
-                                        time_step)
+        new_trajectory_time = np.linspace(trajectory_time[0], trajectory_time[-1], new_points_num)
+        new_trajectory_time = np.arange(0, trajectory_time[-1] + 0.001, time_step)
 
         # interpolate the trajectory
         if len(trajectory_time) < 3:
-            f = interpolate.interp1d(trajectory_time,
-                                     trajectory_pos,
-                                     kind='linear')
+            f = interpolate.interp1d(trajectory_time, trajectory_pos, kind="linear")
         elif len(trajectory_time) == 3:
-            f = interpolate.interp1d(trajectory_time,
-                                     trajectory_pos,
-                                     kind='quadratic')
+            f = interpolate.interp1d(trajectory_time, trajectory_pos, kind="quadratic")
         else:
-            f = interpolate.interp1d(trajectory_time,
-                                     trajectory_pos,
-                                     kind='cubic')
+            f = interpolate.interp1d(trajectory_time, trajectory_pos, kind="cubic")
         new_trajectory_pos = f(new_trajectory_time).transpose()
 
         return new_trajectory_pos.tolist()
@@ -265,14 +335,14 @@ def main():
         rospy.logwarn("No joint names found on the parameter server")
 
         # if not found, use default joint names
-        if robot_name == 'NRMK-IndyRP2':
-            joint_names = ['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        if robot_name == "NRMK-IndyRP2":
+            joint_names = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
         else:
-            joint_names = ['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5']
+            joint_names = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5"]
 
     t = IndyROSConnector(robot_ip, robot_name, joint_names)
     t.run()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
